@@ -34,7 +34,7 @@ packet and can optionally produce JSON Lines output.
 
 %install
 %pyproject_install
-%pyproject_save_files ec3k
+%pyproject_save_files capture ec3k
 
 %check
 %pytest
