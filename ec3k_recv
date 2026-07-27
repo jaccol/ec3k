@@ -44,7 +44,7 @@ def main():
 	def callback(state):
 		if args.json:
 			print(json.dumps(dict(timestamp=int(state.timestamp),
-			                      id=state.id,
+			                      id='%04x' % state.id,
 			                      device_on_flag=state.device_on_flag,
 			                      energy=state.energy,
 			                      power_current=state.power_current,
@@ -56,7 +56,7 @@ def main():
 			print(state, flush=True)
 
 	if args.frequency is None:
-		frequency = 868.402e6 if args.rtl_fm else 868.260e6
+		frequency = 868.402e6 if args.rtl_fm else 868.225e6
 	else:
 		frequency = args.frequency
 

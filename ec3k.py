@@ -286,7 +286,7 @@ class EnergyCount3KState:
 
 class EnergyCount3K:
 	"""Object representing EnergyCount 3000 receiver"""
-	def __init__(self, id=None, callback=None, freq=868.260e6, device=0,
+	def __init__(self, id=None, callback=None, freq=868.225e6, device=0,
 				 ppm=0, device_args="", squelch=True, source="soapy"):
 		"""Create a new EnergyCount3K object
 

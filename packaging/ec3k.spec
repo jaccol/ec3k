@@ -1,5 +1,5 @@
 Name:           ec3k
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        Receive EnergyCount 3000 transmissions with RTL-SDR
 License:        GPL-3.0-or-later
@@ -46,5 +46,8 @@ packet and can optionally produce JSON Lines output.
 %{_bindir}/ec3k_recv
 
 %changelog
+* Mon Jul 27 2026 Jacco <jacco@localhost> - 1.2.1-1
+- Calibrate the GNU Radio default frequency and restore hexadecimal JSON IDs
+
 * Mon Jul 27 2026 Jacco <jacco@localhost> - 1.2.0-1
 - Modernize for Python 3, GNU Radio 3.10, and SoapyRTLSDR

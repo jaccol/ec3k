@@ -35,6 +35,9 @@ The command-line receiver writes a tab-separated record for each status update::
 
     timestamp  id  time_total  time_on  energy  power_current  power_max  reset_counter
 
+``time_total`` is a transmitter firmware counter and can remain at its maximum
+value. Use receive timestamps or ``time_on`` for elapsed-time calculations.
+
 You can also get the last received state by calling the ``get`` method on
 the EnergyCount3K object. See docstrings for details.
 
@@ -67,8 +70,12 @@ To try it out, run the example command-line client::
 
     $ ec3k_recv
 
-The GNU Radio receiver defaults to 868.260 MHz. Set ``--frequency`` when
+The GNU Radio receiver defaults to 868.225 MHz. Set ``--frequency`` when
 calibrating another receiver or channel.
+
+On the current RTL-SDR, a 40-second live sweep produced 26 CRC-valid records
+at 868.225 MHz, compared with 15 at the previous 868.260 MHz default. Tune
+``--ppm`` and repeat the sweep when using a different dongle or antenna.
 
 For troubleshooting or compatibility with the ``rtl_fm`` demodulator, the
 included capture utility can decode its signed 16-bit output::

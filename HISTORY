@@ -1,5 +1,10 @@
 Version history for ec3k
 
+1.2.1   2026-07-27
+
+        * Calibrated the GNU Radio receiver default frequency.
+        * Restored hexadecimal device IDs in JSON Lines output.
+
 1.2.0   2026-07-27
 
         * Ported the receiver, packet decoder, and CLI to Python 3.
