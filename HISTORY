@@ -1,5 +1,11 @@
 Version history for ec3k
 
+1.2.0   2026-07-27
+
+        * Ported the receiver, packet decoder, and CLI to Python 3.
+        * Added SoapyRTLSDR support for current GNU Radio releases.
+        * Restored the legacy TSV receiver output and added an rtl_fm fallback.
+
 1.1.1   2015-01-11
 
         * Fix "output 1 is not connected internally" error when using

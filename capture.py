@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 """Software receiver for EnergyCount 3000
 Copyright (C) 2013  Gasper Zejn
 
@@ -19,6 +19,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import sys
 from optparse import OptionParser
 import os
+import struct
+import time
 
 BUFFSIZE = 4096
 MOD_UNKNOWN = 2
@@ -61,7 +63,7 @@ class Packet:
 	
 	def trim(self, data):
 		
-		if len(data) < 10:
+		if len(data) <= self.expected_bit_size:
 			return []
 		
 		if len(set(data[:self.expected_bit_size])) == 1:
@@ -117,7 +119,6 @@ class Packet:
 		cp = None
 		
 		#print ''.join([str(i) for i in self.data]).replace('0', '.')
-		print ''.join([str(i) for i in self.trim(self.data)]).replace('0', '.')
 		
 		if len(self.data) < 50:
 			return False
@@ -186,14 +187,14 @@ class Packet:
 				r = pl / cp
 				nbits = int(round(r))
 				
-				for n in xrange(nbits):
+				for n in range(nbits):
 					self.push_bit(pv)
 				pv = v
 				pt = t
 		
 		hd = iter('%x' % self.bits)
 		h = ' '.join(['%s%s' % i for i in zip(hd, hd)])
-		print 'data ', h
+		print('data', h, flush=True)
 
 class Packetizer:
 	
@@ -201,7 +202,7 @@ class Packetizer:
 		self.sample_cnt = 0
 		self.pv = 0
 		self.packet = None
-		self.data = ""
+		self.data = b""
 	
 	def feed(self, data):
 		self.data = self.data + data
@@ -221,7 +222,7 @@ class Packetizer:
 		breaklen = 0
 		
 		while i < datalen:
-			v = ord(self.data[i]) >= 190 and 1 or 0
+			v = self.data[i] >= 190 and 1 or 0
 			
 			if v != self.pv:
 				inpacket = True
@@ -246,8 +247,103 @@ class Packetizer:
 					inpacket = False
 			
 			i += 1
-		self.data = ''
+		self.data = b''
 		
+
+class RtlFmPacketizer:
+	"""Recover EC3K packets from the signed 16-bit output of rtl_fm -A fast."""
+	LEVEL_THRESHOLD = 47
+	BITTIME = 10
+	BITTIME_BOUND_LOWER = 9
+	BITTIME_BOUND_UPPER = 11
+	PACKET_MIN_BITS = 100
+
+	def __init__(self):
+		self.bits = []
+		self.last_level = 0
+		self.last_edge = 0
+
+	def feed(self, data):
+		for (sample,) in struct.iter_unpack('<h', data):
+			level = self.last_level
+			high_byte = sample >> 8
+			if self.LEVEL_THRESHOLD < high_byte < 70:
+				level = 1
+			elif 20 < high_byte < self.LEVEL_THRESHOLD:
+				level = 0
+
+			if level != self.last_level:
+				if self.last_edge >= self.BITTIME_BOUND_LOWER:
+					self.bits.append(0)
+				else:
+					if len(self.bits) > self.PACKET_MIN_BITS:
+						yield from self._decode_bits()
+					self.bits = []
+				self.last_edge = 0
+
+			if self.last_edge >= self.BITTIME_BOUND_UPPER:
+				self.last_edge -= self.BITTIME
+				self.bits.append(1)
+
+			self.last_edge += 1
+			self.last_level = level
+
+	def _decode_bits(self):
+		packet = False
+		packet_bytes = []
+		one_count = 0
+		received_byte = 0
+		received_bits = 0
+
+		for index in range(17, len(self.bits)):
+			bit = self.bits[index]
+			if index > 17:
+				bit ^= self.bits[index - 17]
+			if index > 12:
+				bit ^= self.bits[index - 12]
+
+			if bit:
+				one_count += 1
+				received_byte = (received_byte >> 1) | 0x80
+				received_bits += 1
+				if received_bits == 8 and packet:
+					packet_bytes.append(received_byte)
+					received_bits = 0
+			else:
+				if one_count < 5:
+					received_byte >>= 1
+					received_bits += 1
+					if received_bits == 8 and packet:
+						packet_bytes.append(received_byte)
+						received_bits = 0
+				if one_count == 6:
+					packet = not packet
+					received_bits = 0
+					if len(packet_bytes) == 41:
+						yield packet_bytes
+					packet_bytes = []
+				one_count = 0
+
+
+def decode_rtl_fm_packet(packet):
+	"""Decode the fields exposed by the original rtl_fm compatibility decoder."""
+	device_id = ((packet[0] & 0x0f) << 12) | (packet[1] << 4) | (packet[2] >> 4)
+	power_current = ((packet[15] & 0x0f) << 12) | (packet[16] << 4) | (packet[17] >> 4)
+	energy = ((packet[33] & 0x0f) << 12) | (packet[34] << 4) | (packet[35] >> 4)
+	energy = (energy << 28) | (packet[12] << 20) | (packet[13] << 12) | (packet[14] << 4) | (packet[15] >> 4)
+	return device_id, power_current, energy
+
+
+def run_rtl_fm_loop(fd):
+	packetizer = RtlFmPacketizer()
+	while True:
+		data = fd.read(BUFFSIZE)
+		if not data:
+			break
+		for packet in packetizer.feed(data):
+			device_id, power_current, energy = decode_rtl_fm_packet(packet)
+			print('%d,%x,%d,%d' % (int(time.time()), device_id, power_current, energy), flush=True)
+
 
 def run_loop(fd):
 	
@@ -275,17 +371,22 @@ def main():
 			help="read baseband data from FILE")
 	parser.add_option("-v", dest="verbose", action="store_true",
 			help="enable verbose decoder debug output on stderr")
+	parser.add_option("--rtl-fm", dest="rtl_fm", action="store_true",
+			help="decode signed 16-bit output from rtl_fm -A fast")
 
 	(options, args) = parser.parse_args()
 
 	if options.input:
 		fd = open(options.input, 'rb')
 	else:
-		fd = sys.stdin
+		fd = sys.stdin.buffer
 
 	verbose = options.verbose
 
-	run_loop(fd)
+	if options.rtl_fm:
+		run_rtl_fm_loop(fd)
+	else:
+		run_loop(fd)
 
 
 if __name__ == "__main__":

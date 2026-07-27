@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ec3k"
+version = "1.2.0"
+description = "Receive and decode EnergyCount 3000 transmissions with RTL-SDR."
+readme = "README.rst"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Tomaz Solc", email = "tomaz.solc@tablix.org" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+]
+
+[tool.setuptools]
+py-modules = ["capture", "ec3k"]
+script-files = ["ec3k_recv", "capture.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_ec3k.py"]

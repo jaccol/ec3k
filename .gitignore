@@ -2,4 +2,6 @@ dist
 build
 MANIFEST
 *.pyc
+__pycache__/
+*.egg-info/
 .tox

@@ -14,13 +14,10 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
-from gnuradio import digital
-from gnuradio import gr, blocks, filter, analog
-
 import itertools
 import math
+import os
 import os.path
-import osmosdr
 import select
 import signal
 import subprocess
@@ -35,6 +32,13 @@ def which(program):
 			return fpath
 
 	return None
+
+
+def capture_fields(line):
+	"""Split a capture subprocess line on both Python 2 and Python 3."""
+	if isinstance(line, bytes):
+		line = line.decode('ascii', 'replace')
+	return line.split()
 
 class InvalidPacket(Exception): pass
 
@@ -63,6 +67,22 @@ class EnergyCount3KState:
 	
 	CRC = 0xf0b8
 
+	@classmethod
+	def from_rtl_fm_packet(cls, packet):
+		"""Decode a 41-byte packet recovered from rtl_fm -A fast output."""
+		if len(packet) != 41:
+			raise InvalidPacket("Wrong rtl_fm packet length: %d" % len(packet))
+
+		nibbles = [nibble for value in packet for nibble in (value >> 4, value & 0xf)]
+		# The rtl_fm packet format omits the two-nibble end marker. It is not
+		# covered by the CRC or used by field decoding.
+		nibbles += [0, 0]
+
+		state = cls.__new__(cls)
+		state._check_crc(nibbles)
+		state._decode_packet(nibbles)
+		return state
+
 	def __init__(self, hex_bytes):
 		bits = self._get_bits(hex_bytes)
 		bits = [ not bit for bit in bits ]
@@ -85,16 +105,16 @@ class EnergyCount3KState:
 
 		for hex_byte in hex_bytes:
 			i = int(hex_byte, 16)
-			for n in xrange(8):
+			for n in range(8):
 				bits.append(bool((i<<n) & 0x80))
 
 		return bits
 
 	def _get_nibbles(self, bits):
 		"""Shift bits into bytes, MSB first"""
-		nibbles = [0] * (len(bits) / 4)
+		nibbles = [0] * (len(bits) // 4)
 		for n, bit in enumerate(bits):
-			nibbles[n/4] |= (int(bit) << (3-n%4))
+			nibbles[n // 4] |= (int(bit) << (3-n % 4))
 
 		return nibbles
 
@@ -104,7 +124,7 @@ class EnergyCount3KState:
 
 		# first, invert byte bit order 
 		args = [iter(bits)] * 8
-		for bit_group in itertools.izip_longest(fillvalue=False, *args):
+		for bit_group in itertools.zip_longest(fillvalue=False, *args):
 			nbits += reversed(bit_group)
 
 		return nbits
@@ -173,7 +193,7 @@ class EnergyCount3KState:
 			raise InvalidPacket("Wrong length: %d" % len(nibbles))
 
 		crc = 0xffff
-		for i in xrange(0, 82, 2):
+		for i in range(0, 82, 2):
 			crc = self._crc_ccitt_update(crc, nibbles[i] * 0x10 + nibbles[i+1])
 
 		if crc != self.CRC:
@@ -249,30 +269,25 @@ class EnergyCount3KState:
 		self.current_power = self.power_current
 		self.max_power = self.power_max
 
-	def __str__(self):
-		if self.device_on_flag:
-			flag = '*'
-		else:
-			flag = ' '
+	def to_tsv(self):
+		"""Return the historical tab-separated receiver record."""
+		return ("%d\t%04x\t%d\t%d\t%d\t%.1f\t%.1f\t%d" % (
+				int(self.timestamp),
+				self.id,
+				self.time_total,
+				self.time_on,
+				self.energy,
+				self.power_current,
+				self.power_max,
+				self.reset_counter))
 
-		return	("id              : %04x\n"
-			"time total      : %d seconds\n"
-			"time on %s       : %d seconds\n"
-			"energy %s        : %d Ws\n"
-			"power current   : %.1f W\n"
-			"power max       : %.1f W\n"
-			"reset counter   : %d") % (
-					self.id,
-					self.time_total,
-					flag, self.time_on,
-					flag, self.energy,
-					self.power_current,
-					self.power_max,
-					self.reset_counter)
+	def __str__(self):
+		return self.to_tsv()
 
 class EnergyCount3K:
 	"""Object representing EnergyCount 3000 receiver"""
-	def __init__(self, id=None, callback=None, freq=868.402e6, device=0, osmosdr_args=None):
+	def __init__(self, id=None, callback=None, freq=868.260e6, device=0,
+				 ppm=0, device_args="", squelch=True, source="soapy"):
 		"""Create a new EnergyCount3K object
 
 		Takes the following optional keyword arguments:
@@ -281,7 +296,10 @@ class EnergyCount3K:
 		freq -- central frequency of the channel on which to listen for
 		updates (default is known to work for European devices)
 		device -- rtl-sdr device to use
-		osmosdr_args -- any additional OsmoSDR arguments (e.g. "offset_tune=1")
+		ppm -- frequency correction in parts per million
+		device_args -- additional SoapySDR RTL-SDR device arguments
+		squelch -- enable adaptive RF squelch
+		source -- SDR source backend: "soapy" or "osmosdr"
 
 		If ID is None, then packets for all devices will be received.
 
@@ -292,11 +310,15 @@ class EnergyCount3K:
 		self.callback = callback
 		self.freq = freq
 		self.device = device
-		self.osmosdr_args = osmosdr_args
+		self.ppm = ppm
+		self.device_args = device_args
+		self.squelch_enabled = squelch
+		self.source = source
 
 		self.want_stop = True
 		self.state = None
 		self.noise_level = -90
+		self.tb = None
 
 	def start(self):
 		"""Start the receiver"""
@@ -305,14 +327,26 @@ class EnergyCount3K:
 		self.want_stop = False
 		self.threads = []
 
-		self._start_capture()
+		try:
+			self._start_capture()
 
-		capture_thread = threading.Thread(target=self._capture_thread)
-		capture_thread.start()
-		self.threads.append(capture_thread)
+			capture_thread = threading.Thread(target=self._capture_thread)
+			capture_thread.start()
+			self.threads.append(capture_thread)
 
-		self._setup_top_block()
-		self.tb.start()
+			self._setup_top_block()
+			self.tb.start()
+		except:
+			self.want_stop = True
+			for thread in self.threads:
+				thread.join()
+			if self.tb is not None:
+				self.tb.stop()
+				self.tb.wait()
+				self.tb = None
+			if hasattr(self, 'pipe'):
+				self._clean_capture()
+			raise
 
 	def stop(self):
 		"""Stop the receiver and clean up"""
@@ -323,8 +357,10 @@ class EnergyCount3K:
 		for thread in self.threads:
 			thread.join()
 
-		self.tb.stop()
-		self.tb.wait()
+		if self.tb is not None:
+			self.tb.stop()
+			self.tb.wait()
+			self.tb = None
 
 		self._clean_capture()
 
@@ -353,8 +389,9 @@ class EnergyCount3K:
 				if fpath is not None:
 					self.capture_process = subprocess.Popen(
 						[fpath, "-f", self.pipe],
-						bufsize=1,
-						stdout=subprocess.PIPE)
+						bufsize=0,
+						stdout=subprocess.PIPE,
+						start_new_session=True)
 					return
 
 			raise Exception("Can't find capture binary in PATH")
@@ -368,8 +405,18 @@ class EnergyCount3K:
 			self.capture_process.wait()
 			self.capture_process = None
 
-		os.unlink(self.pipe)
-		os.rmdir(self.tempdir)
+		if self.pipe is not None:
+			try:
+				os.unlink(self.pipe)
+			except FileNotFoundError:
+				pass
+			self.pipe = None
+		if self.tempdir is not None:
+			try:
+				os.rmdir(self.tempdir)
+			except FileNotFoundError:
+				pass
+			self.tempdir = None
 
 	def _capture_thread(self):
 
@@ -377,13 +424,12 @@ class EnergyCount3K:
 
 			rlist, wlist, xlist = select.select([self.capture_process.stdout], [], [], 1)
 			if rlist:
-				line = rlist[0].readline()
-				fields = line.split()
+				fields = capture_fields(rlist[0].readline())
 				if fields and (fields[0] == 'data'):
 					self._log("Decoding packet")
 					try:
 						state = EnergyCount3KState(fields[1:])
-					except InvalidPacket, e:
+					except InvalidPacket as e:
 						self._log("Invalid packet: %s" % (e,))
 						continue
 
@@ -403,6 +449,7 @@ class EnergyCount3K:
 			time.sleep(1.0)
 
 	def _setup_top_block(self):
+		from gnuradio import analog, blocks, digital, fft, filter, gr
 
 		self.tb = gr.top_block()
 
@@ -410,38 +457,57 @@ class EnergyCount3K:
 		oversample = 10
 
 		# Radio receiver, initial downsampling
-		args = "rtl=%d,buffers=16" % (self.device,)
-		if self.osmosdr_args:
-			args += ",%s" % (self.osmosdr_args,)
+		if self.source == "soapy":
+			from gnuradio import soapy
 
-		osmosdr_source = osmosdr.source(args=args)
-		osmosdr_source.set_sample_rate(samp_rate*oversample)
-		osmosdr_source.set_center_freq(self.freq, 0)
-		osmosdr_source.set_freq_corr(0, 0)
-		osmosdr_source.set_gain_mode(True, 0)
-		osmosdr_source.set_gain(0, 0)
+			device_args = "device=%d" % self.device
+			if self.device_args:
+				device_args += ",%s" % self.device_args
+			radio_source = soapy.source(
+				"driver=rtlsdr", "fc32", 1, device_args, "bufflen=16384", [""], [""])
+			radio_source.set_sample_rate(0, samp_rate*oversample)
+			radio_source.set_frequency(0, self.freq)
+			radio_source.set_frequency_correction(0, self.ppm)
+			radio_source.set_gain_mode(0, True)
+		elif self.source == "osmosdr":
+			import osmosdr
+
+			device_args = "rtl=%d,buffers=16" % self.device
+			if self.device_args:
+				device_args += ",%s" % self.device_args
+			radio_source = osmosdr.source(args=device_args)
+			radio_source.set_sample_rate(samp_rate*oversample)
+			radio_source.set_center_freq(self.freq, 0)
+			radio_source.set_freq_corr(self.ppm, 0)
+			radio_source.set_gain_mode(True, 0)
+			radio_source.set_gain(0, 0)
+		else:
+			raise ValueError("Unknown SDR source backend: %s" % self.source)
 
 		taps = filter.firdes.low_pass(1, samp_rate*oversample, 90e3, 8e3,
-				filter.firdes.WIN_HAMMING, 6.76)
+				fft.window.WIN_HAMMING, 6.76)
 		low_pass_filter = filter.fir_filter_ccf(oversample, taps)
 
-		self.tb.connect((osmosdr_source, 0), (low_pass_filter, 0))
+		self.tb.connect((radio_source, 0), (low_pass_filter, 0))
 
-		# Squelch
-		self.noise_probe = analog.probe_avg_mag_sqrd_c(0, 1.0/samp_rate/1e2)
-		self.squelch = analog.simple_squelch_cc(self.noise_level, 1)
+		if self.squelch_enabled:
+			self.noise_probe = analog.probe_avg_mag_sqrd_c(0, 1.0/samp_rate/1e2)
+			self.squelch = analog.simple_squelch_cc(self.noise_level, 1)
 
-		noise_probe_thread = threading.Thread(target=self._noise_probe_thread)
-		noise_probe_thread.start()
-		self.threads.append(noise_probe_thread)
+			noise_probe_thread = threading.Thread(target=self._noise_probe_thread)
+			noise_probe_thread.start()
+			self.threads.append(noise_probe_thread)
 
-		self.tb.connect((low_pass_filter, 0), (self.noise_probe, 0))
-		self.tb.connect((low_pass_filter, 0), (self.squelch, 0))
+			self.tb.connect((low_pass_filter, 0), (self.noise_probe, 0))
+			self.tb.connect((low_pass_filter, 0), (self.squelch, 0))
+			demod_input = self.squelch
+		else:
+			demod_input = low_pass_filter
 
 		# FM demodulation
 		quadrature_demod = analog.quadrature_demod_cf(1)
 
-		self.tb.connect((self.squelch, 0), (quadrature_demod, 0))
+		self.tb.connect((demod_input, 0), (quadrature_demod, 0))
 
 		# Binary slicing, transformation into capture-compatible format
 

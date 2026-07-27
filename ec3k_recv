@@ -1,15 +1,17 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 import ec3k
 import signal
+import subprocess
+import sys
 import time
 import argparse
 import json
+import capture
 
 want_stop = False
 
 def handler(signum, frame):
 	global want_stop
-	print "Signal %d caught! Stopping..." % (signum,)
 	want_stop = True
 
 def main():
@@ -17,32 +19,84 @@ def main():
 	signal.signal(signal.SIGINT, handler)
 
 	parser = argparse.ArgumentParser()
-	parser.add_argument('-f', '--frequency', type = float, default = 868.402e6)
-	parser.add_argument('-j', '--json', action = 'store_true', default = False)
-	parser.add_argument('-q', '--quiet', action = 'store_true', default = False)
+	parser.add_argument('-f', '--frequency', type=float,
+			help='receiver center frequency in Hz')
+	parser.add_argument('-d', '--device', type=int, default=0,
+			help='RTL-SDR device index (default: %(default)s)')
+	parser.add_argument('--ppm', type=float, default=0,
+			help='RTL-SDR frequency correction in parts per million')
+	parser.add_argument('--device-args', default='',
+			help='additional SoapySDR RTL-SDR device arguments')
+	parser.add_argument('--source', choices=('soapy', 'osmosdr'), default='soapy',
+			help='GNU Radio SDR source backend (default: %(default)s)')
+	parser.add_argument('--no-squelch', action='store_true',
+			help='disable adaptive RF squelch')
+	parser.add_argument('--rtl-fm', action='store_true',
+			help='use the rtl_fm compatibility receiver backend')
+	parser.add_argument('-j', '--json', action='store_true',
+			help='write JSON Lines instead of legacy TSV records')
+	parser.add_argument('-q', '--quiet', action='store_true',
+			help='suppress receiver status messages on stderr')
+	parser.add_argument('-v', '--verbose', action='store_true',
+			help='write decoder diagnostics to stderr')
 	args = parser.parse_args()
 
 	def callback(state):
 		if args.json:
-			print(json.dumps(dict(id=state.id,
+			print(json.dumps(dict(timestamp=int(state.timestamp),
+			                      id=state.id,
 			                      device_on_flag=state.device_on_flag,
 			                      energy=state.energy,
 			                      power_current=state.power_current,
 			                      power_max=state.power_max,
+			                      reset_counter=state.reset_counter,
 			                      time_on=state.time_on,
-			                      time_total=state.time_total)))
+			                      time_total=state.time_total)), flush=True)
 		else:
-			print(state)
+			print(state, flush=True)
 
-	my_ec3k = ec3k.EnergyCount3K(callback=callback, freq=args.frequency)
-	my_ec3k.start()
+	if args.frequency is None:
+		frequency = 868.402e6 if args.rtl_fm else 868.260e6
+	else:
+		frequency = args.frequency
 
-	while not want_stop:
-		time.sleep(2)
-		if not args.quiet:
-			print "Noise level: %.1f dB" % (my_ec3k.noise_level,)
+	if args.rtl_fm:
+		process = subprocess.Popen(
+			['rtl_fm', '-f', str(int(frequency)), '-s', '200000', '-A', 'fast', '-'],
+			stdout=subprocess.PIPE)
+		packetizer = capture.RtlFmPacketizer()
+		try:
+			while not want_stop:
+				data = process.stdout.read(4096)
+				if not data:
+					break
+				for packet in packetizer.feed(data):
+					try:
+						callback(ec3k.EnergyCount3KState.from_rtl_fm_packet(packet))
+					except ec3k.InvalidPacket as error:
+						if args.verbose:
+							print("Invalid packet: %s" % error, file=sys.stderr)
+		finally:
+			process.terminate()
+			process.wait()
+		return
 
-	my_ec3k.stop()
+	my_ec3k = ec3k.EnergyCount3K(
+		callback=callback, freq=frequency, device=args.device,
+		ppm=args.ppm, device_args=args.device_args,
+		squelch=not args.no_squelch, source=args.source)
+	if args.verbose:
+		my_ec3k._log = lambda message: print(message, file=sys.stderr)
+	try:
+		my_ec3k.start()
+
+		while not want_stop:
+			time.sleep(2)
+			if not args.quiet:
+				print("Noise level: %.1f dB" % my_ec3k.noise_level, file=sys.stderr)
+	finally:
+		if not my_ec3k.want_stop:
+			my_ec3k.stop()
 
 if __name__ == '__main__':
 	main()
