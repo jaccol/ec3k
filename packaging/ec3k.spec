@@ -1,6 +1,6 @@
 Name:           ec3k
-Version:        1.2.1
-Release:        2%{?dist}
+Version:        1.2.2
+Release:        1%{?dist}
 Summary:        Receive EnergyCount 3000 transmissions with RTL-SDR
 License:        GPL-3.0-or-later
 URL:            https://github.com/jaccol/ec3k
@@ -46,6 +46,9 @@ packet and can optionally produce JSON Lines output.
 %{_bindir}/ec3k_recv
 
 %changelog
+* Fri Oct 09 2026 Jacco <jacco@localhost> - 1.2.2-1
+- Release configurable receiver tuning support
+
 * Thu Oct 08 2026 Jacco <jacco@localhost> - 1.2.1-2
 - Add serial-based RTL-SDR selection and configurable receiver DSP controls
 - Make adaptive squelch margin configurable
