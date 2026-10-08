@@ -5,6 +5,16 @@ import ec3k
 
 
 class TestEnergyCount3KState:
+	def test_filter_cutoff_is_configurable(self):
+		receiver = ec3k.EnergyCount3K(
+			filter_cutoff=40e3, decimation=5, device_query='serial=00000001',
+			squelch_margin=5.0)
+
+		assert receiver.filter_cutoff == 40e3
+		assert receiver.decimation == 5
+		assert receiver.device_query == 'serial=00000001'
+		assert receiver.squelch_margin == 5.0
+
 	def test_capture_fields_accepts_subprocess_bytes(self):
 		fields = ec3k.capture_fields(b'data d4 01 8c 7e\n')
 		assert fields == ['data', 'd4', '01', '8c', '7e']

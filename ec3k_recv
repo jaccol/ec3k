@@ -27,10 +27,18 @@ def main():
 			help='RTL-SDR frequency correction in parts per million')
 	parser.add_argument('--device-args', default='',
 			help='additional SoapySDR RTL-SDR device arguments')
+	parser.add_argument('--device-query', default='',
+			help='complete SoapySDR RTL-SDR device selector, such as serial=00000001')
 	parser.add_argument('--source', choices=('soapy', 'osmosdr'), default='soapy',
 			help='GNU Radio SDR source backend (default: %(default)s)')
+	parser.add_argument('--filter-cutoff', type=float, default=90e3,
+			help='pre-decimation low-pass cutoff in Hz (default: %(default)s)')
+	parser.add_argument('--decimation', type=int, default=10,
+			help='FIR decimation factor (default: %(default)s)')
 	parser.add_argument('--no-squelch', action='store_true',
 			help='disable adaptive RF squelch')
+	parser.add_argument('--squelch-margin-db', type=float, default=7.0,
+			help='dB above measured noise required to open squelch (default: %(default)s)')
 	parser.add_argument('--rtl-fm', action='store_true',
 			help='use the rtl_fm compatibility receiver backend')
 	parser.add_argument('-j', '--json', action='store_true',
@@ -40,6 +48,10 @@ def main():
 	parser.add_argument('-v', '--verbose', action='store_true',
 			help='write decoder diagnostics to stderr')
 	args = parser.parse_args()
+	if args.decimation <= 0:
+		parser.error('--decimation must be positive')
+	if args.squelch_margin_db < 0:
+		parser.error('--squelch-margin-db must be non-negative')
 
 	def callback(state):
 		if args.json:
@@ -83,8 +95,10 @@ def main():
 
 	my_ec3k = ec3k.EnergyCount3K(
 		callback=callback, freq=frequency, device=args.device,
-		ppm=args.ppm, device_args=args.device_args,
-		squelch=not args.no_squelch, source=args.source)
+		ppm=args.ppm, device_args=args.device_args, device_query=args.device_query,
+		squelch=not args.no_squelch, source=args.source,
+		filter_cutoff=args.filter_cutoff, decimation=args.decimation,
+		squelch_margin=args.squelch_margin_db)
 	if args.verbose:
 		my_ec3k._log = lambda message: print(message, file=sys.stderr)
 	try:

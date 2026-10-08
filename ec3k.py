@@ -287,7 +287,9 @@ class EnergyCount3KState:
 class EnergyCount3K:
 	"""Object representing EnergyCount 3000 receiver"""
 	def __init__(self, id=None, callback=None, freq=868.225e6, device=0,
-				 ppm=0, device_args="", squelch=True, source="soapy"):
+				 ppm=0, device_args="", squelch=True, source="soapy",
+				 filter_cutoff=90e3, decimation=10, device_query="",
+				 squelch_margin=7.0):
 		"""Create a new EnergyCount3K object
 
 		Takes the following optional keyword arguments:
@@ -298,8 +300,12 @@ class EnergyCount3K:
 		device -- rtl-sdr device to use
 		ppm -- frequency correction in parts per million
 		device_args -- additional SoapySDR RTL-SDR device arguments
+		device_query -- complete SoapySDR device selector, such as a serial number
 		squelch -- enable adaptive RF squelch
 		source -- SDR source backend: "soapy" or "osmosdr"
+		filter_cutoff -- pre-decimation low-pass cutoff in Hz
+		decimation -- FIR decimation factor (default produces 96 kS/s output)
+		squelch_margin -- dB above measured noise required to open squelch
 
 		If ID is None, then packets for all devices will be received.
 
@@ -312,8 +318,14 @@ class EnergyCount3K:
 		self.device = device
 		self.ppm = ppm
 		self.device_args = device_args
+		self.device_query = device_query
 		self.squelch_enabled = squelch
 		self.source = source
+		self.filter_cutoff = filter_cutoff
+		self.squelch_margin = squelch_margin
+		if decimation <= 0:
+			raise ValueError("decimation must be positive")
+		self.decimation = decimation
 
 		self.want_stop = True
 		self.state = None
@@ -445,7 +457,7 @@ class EnergyCount3K:
 			self.noise_level = 10 * math.log10(max(1e-9, power))
 			self._log("Current noise level: %.1f dB" % (self.noise_level,))
 
-			self.squelch.set_threshold(self.noise_level+7.0)
+			self.squelch.set_threshold(self.noise_level + self.squelch_margin)
 			time.sleep(1.0)
 
 	def _setup_top_block(self):
@@ -453,19 +465,19 @@ class EnergyCount3K:
 
 		self.tb = gr.top_block()
 
-		samp_rate = 96000
-		oversample = 10
+		input_sample_rate = 960000
+		output_sample_rate = input_sample_rate / self.decimation
 
 		# Radio receiver, initial downsampling
 		if self.source == "soapy":
 			from gnuradio import soapy
 
-			device_args = "device=%d" % self.device
+			device_args = self.device_query or "device=%d" % self.device
 			if self.device_args:
 				device_args += ",%s" % self.device_args
 			radio_source = soapy.source(
 				"driver=rtlsdr", "fc32", 1, device_args, "bufflen=16384", [""], [""])
-			radio_source.set_sample_rate(0, samp_rate*oversample)
+			radio_source.set_sample_rate(0, input_sample_rate)
 			radio_source.set_frequency(0, self.freq)
 			radio_source.set_frequency_correction(0, self.ppm)
 			radio_source.set_gain_mode(0, True)
@@ -476,7 +488,7 @@ class EnergyCount3K:
 			if self.device_args:
 				device_args += ",%s" % self.device_args
 			radio_source = osmosdr.source(args=device_args)
-			radio_source.set_sample_rate(samp_rate*oversample)
+			radio_source.set_sample_rate(input_sample_rate)
 			radio_source.set_center_freq(self.freq, 0)
 			radio_source.set_freq_corr(self.ppm, 0)
 			radio_source.set_gain_mode(True, 0)
@@ -484,14 +496,15 @@ class EnergyCount3K:
 		else:
 			raise ValueError("Unknown SDR source backend: %s" % self.source)
 
-		taps = filter.firdes.low_pass(1, samp_rate*oversample, 90e3, 8e3,
+		taps = filter.firdes.low_pass(1, input_sample_rate, self.filter_cutoff, 8e3,
 				fft.window.WIN_HAMMING, 6.76)
-		low_pass_filter = filter.fir_filter_ccf(oversample, taps)
+		low_pass_filter = filter.fir_filter_ccf(self.decimation, taps)
 
 		self.tb.connect((radio_source, 0), (low_pass_filter, 0))
 
 		if self.squelch_enabled:
-			self.noise_probe = analog.probe_avg_mag_sqrd_c(0, 1.0/samp_rate/1e2)
+			self.noise_probe = analog.probe_avg_mag_sqrd_c(
+					0, 1.0/output_sample_rate/1e2)
 			self.squelch = analog.simple_squelch_cc(self.noise_level, 1)
 
 			noise_probe_thread = threading.Thread(target=self._noise_probe_thread)
